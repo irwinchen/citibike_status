@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Citi Bike Station Status</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@100..900&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            font-family: "Outfit", sans-serif;
+            font-optical-sizing: auto;
+        }
+        #clock {
+            font-size: 2.5rem;
+            color: #0077be;
+        }
+        .text-value-red {
+            color: red;
+        }
+        .text-value-yellow {
+            color: #ffc107;
+        }
+        .text-value-green {
+            color: green;
+        }
+        .availability-icons {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 2px;
+        }
+        .availability-icons img {
+            width: 20px;
+            height: 20px;
+        }
+        .card-text {
+            font-size: 0.8rem;
+        }
+        #loadingIndicator {
+            display: none;
+        }
+        .location-results {
+            position: absolute;
+            width: 100%;
+            max-height: 200px;
+            overflow-y: auto;
+            z-index: 1000;
+            background-color: white;
+            border: 1px solid #ced4da;
+            border-radius: 0.25rem;
+            display: none;
+        }
+        .location-results div {
+            padding: 0.5rem;
+            cursor: pointer;
+        }
+        .location-results div:hover {
+            background-color: #f8f9fa;
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <div class="container py-4">
+        <h1 class="text-center mb-3">CitiBike Station Status</h1>
+        <div id="currentDate" class="text-center fs-4 text-secondary mb-2"></div>
+        <div id="clock" class="text-center mb-4"></div>
+        <div id="loadingIndicator" class="text-center mb-4">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p>Fetching station data...</p>
+        </div>
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <h4>Nearest to Current Location:</h4>
+                <h3><span id="currentLocationAddress"></span></h3>
+                <div class="mb-3 position-relative">
+                    <input type="text" id="currentLocationInput" class="form-control" placeholder="Type to search for current location">
+                    <div id="currentLocationResults" class="location-results"></div>
+                </div>
+                <div id="currentLocationStations" class="row row-cols-1 row-cols-md-3 g-4"></div>
+            </div>
+            <div class="col-md-6">
+                <h4>Nearest to Destination:</h4>
+                <h3><span id="destinationAddress"></span></h3>
+                <div class="mb-3 position-relative">
+                    <input type="text" id="destinationInput" class="form-control" placeholder="Type to search for a destination station">
+                    <div id="destinationResults" class="location-results"></div>
+                </div>
+                <div id="destinationStations" class="row row-cols-1 row-cols-md-3 g-4"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let allStations = [];
+        let currentLocation = { station_id: "66dcc047-0aca-11e7-82f6-3863bb44ef7c" };
+        let currentDestination = { station_id: "66dcca0d-0aca-11e7-82f6-3863bb44ef7c" };
+        let typeaheadTimer;
+
+        function updateCurrentDate() {
+            const now = new Date();
+            const options = { weekday: 'long', month: 'long', day: 'numeric' };
+            document.getElementById('currentDate').textContent = now.toLocaleDateString('en-US', options);
+        }
+
+        function formatTime(date) {
+            return date.toLocaleTimeString('en-US', { 
+                hour: 'numeric', 
+                minute: '2-digit', 
+                second: '2-digit', 
+                hour12: true 
+            }).replace(/^0/, '');
+        }
+
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('clock').textContent = formatTime(now);
+        }
+
+        function getMinutesAgo(unixTimestamp) {
+            const now = Math.floor(Date.now() / 1000);
+            const diffSeconds = now - unixTimestamp;
+            const minutes = Math.floor(diffSeconds / 60);
+            return minutes === 1 ? "1 minute ago" : `${minutes} minutes ago`;
+        }
+
+        function getColorClass(value) {
+            if (value === 0) return 'text-value-red';
+            if (value >= 1 && value <= 3) return 'text-value-yellow';
+            return 'text-value-green';
+        }
+
+        function createAvailabilityIcons(count, iconSrc) {
+            return Array(count).fill(`<img src="${iconSrc}" alt="Available">`).join('');
+        }
+
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371; // Radius of the Earth in km
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                      Math.sin(dLon/2) * Math.sin(dLon/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        }
+
+        function findNearestStations(station, n = 2) {
+            return [station, ...allStations
+                .filter(s => s.station_id !== station.station_id)
+                .map(s => ({
+                    ...s,
+                    distance: calculateDistance(station.lat, station.lon, s.lat, s.lon)
+                }))
+                .sort((a, b) => a.distance - b.distance)
+                .slice(0, n)];
+        }
+
+        function createStationCard(station) {
+            return `
+                <div class="col">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-body">
+                            <h5 class="card-title text-primary">${station.name}</h5>
+                            <p class="card-text mb-1">Distance: ${station.distance ? station.distance.toFixed(2) + ' km' : 'Current Location'}</p>
+                            <div class="availability-icons mb-2">
+                                ${createAvailabilityIcons(station.num_ebikes_available, 'dock_ebike_sm.png')}
+                                ${createAvailabilityIcons(station.num_bikes_available, 'dock_bike_sm.png')}
+                                ${createAvailabilityIcons(station.num_docks_available, 'dock_nobike_sm.png')}
+                            </div>
+                            <p class="card-text mb-1">E-Bikes: <span class="${getColorClass(station.num_ebikes_available)}">${station.num_ebikes_available}</span></p>
+                            <p class="card-text mb-1">Bikes: <span class="${getColorClass(station.num_bikes_available)}">${station.num_bikes_available}</span></p>
+                            <p class="card-text mb-1">Docks: <span class="${getColorClass(station.num_docks_available)}">${station.num_docks_available}</span></p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function showLoadingIndicator() {
+            document.getElementById('loadingIndicator').style.display = 'block';
+        }
+
+        function hideLoadingIndicator() {
+            document.getElementById('loadingIndicator').style.display = 'none';
+        }
+
+        function filterStations(keyword) {
+            return allStations.filter(station => 
+                station.name.toLowerCase().includes(keyword.toLowerCase())
+            );
+        }
+
+        function displayFilteredStations(filteredStations, resultsContainerId, selectFunction) {
+            const resultsContainer = document.getElementById(resultsContainerId);
+            resultsContainer.innerHTML = '';
+            filteredStations.forEach(station => {
+                const div = document.createElement('div');
+                div.textContent = station.name;
+                div.onclick = () => selectFunction(station);
+                resultsContainer.appendChild(div);
+            });
+            resultsContainer.style.display = filteredStations.length > 0 ? 'block' : 'none';
+        }
+
+        function selectCurrentLocation(station) {
+            currentLocation = station;
+            document.getElementById('currentLocationInput').value = station.name;
+            document.getElementById('currentLocationResults').style.display = 'none';
+            updateStationDisplay();
+        }
+
+        function selectDestination(station) {
+            currentDestination = station;
+            document.getElementById('destinationInput').value = station.name;
+            document.getElementById('destinationResults').style.display = 'none';
+            updateStationDisplay();
+        }
+
+        function updateStationData() {
+            console.log('Updating station data...');
+
+            showLoadingIndicator();
+
+            Promise.all([
+                fetch('https://gbfs.citibikenyc.com/gbfs/en/station_information.json').then(res => res.json()),
+                fetch('https://gbfs.citibikenyc.com/gbfs/en/station_status.json').then(res => res.json())
+            ])
+            .then(([informationData, statusData]) => {
+                console.log('Station information:', informationData);
+                console.log('Station status:', statusData);
+
+                allStations = informationData.data.stations.map(station => {
+                    const status = statusData.data.stations.find(s => s.station_id === station.station_id);
+                    return { ...station, ...status };
+                });
+
+                console.log('All stations:', allStations);
+
+                // Set default values for current location and destination
+                setDefaultLocations();
+
+                updateStationDisplay();
+
+                hideLoadingIndicator();
+            })
+            .catch(error => {
+                console.error('Error fetching data:', error);
+                hideLoadingIndicator();
+                alert('Error fetching station data. Please try again later.');
+            });
+        }
+
+        function setDefaultLocations() {
+            const defaultCurrentLocation = allStations.find(s => s.station_id === currentLocation.station_id);
+            const defaultDestination = allStations.find(s => s.station_id === currentDestination.station_id);
+
+            if (defaultCurrentLocation) {
+                currentLocation = defaultCurrentLocation;
+                document.getElementById('currentLocationInput').value = defaultCurrentLocation.name;
+            }
+
+            if (defaultDestination) {
+                currentDestination = defaultDestination;
+                document.getElementById('destinationInput').value = defaultDestination.name;
+            }
+        }
+
+        function updateStationDisplay() {
+            const nearestToCurrentLocation = findNearestStations(currentLocation);
+            const nearestToDestination = findNearestStations(currentDestination);
+
+            console.log('Nearest to current location:', nearestToCurrentLocation);
+            console.log('Nearest to destination:', nearestToDestination);
+
+            document.getElementById('currentLocationAddress').textContent = currentLocation.name || 'Not set';
+            document.getElementById('destinationAddress').textContent = currentDestination.name || 'Not set';
+
+            document.getElementById('currentLocationStations').innerHTML = nearestToCurrentLocation.map(createStationCard).join('');
+            document.getElementById('destinationStations').innerHTML = nearestToDestination.map(createStationCard).join('');
+        }
+
+        function updateAll() {
+            console.log('Updating all...');
+            updateCurrentDate();
+            updateStationData();
+        }
+
+        function setupTypeahead(inputId, resultsId, selectFunction) {
+            document.getElementById(inputId).addEventListener('input', function(e) {
+                clearTimeout(typeaheadTimer);
+                typeaheadTimer = setTimeout(() => {
+                    const keyword = e.target.value;
+                    const filteredStations = filterStations(keyword);
+                    displayFilteredStations(filteredStations, resultsId, selectFunction);
+                }, 1000);
+            });
+        }
+
+        setupTypeahead('currentLocationInput', 'currentLocationResults', selectCurrentLocation);
+        setupTypeahead('destinationInput', 'destinationResults', selectDestination);
+
+        setInterval(updateClock, 1000);
+
+        updateAll();
+        updateClock();
+
+        setInterval(updateAll, 5 * 60 * 1000);
+    </script>
+</body>
+</html>
